@@ -9,11 +9,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # Включаем логирование
 logging.basicConfig(level=logging.INFO)
 
-# Установлен твой токен
+# Твой токен
 TOKEN = "8656111650:AAG0Sl1Fgwr3T5y6uK5emD0vJz-tKgini3A"
-
-# ЦЕЛЕВОЙ ЧАТ ДЛЯ ИГРЫ
-TARGET_CHAT_ID = -1003839393171
 
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
@@ -188,21 +185,45 @@ SPECIAL_PERKS = [
     "Может обнулить результаты текущего голосования один раз за партию."
 ]
 
-# Игровое состояние
-game_state = {
-    "status": "IDLE", # IDLE, REGISTRATION, PLAYING, VOTING
-    "players": {},    # {user_id: {"name": str, "username": str, "cards": {...}, "revealed": [...]}}
-    "registered_users": set(),
-    "bunker": {},
-    "bunker_capacity": 0,
-    "current_round": 0,
-    "reg_task": None,
-    "voting_data": {}
-}
+# Хранилище игр по чатам (ключ — chat_id)
+chats_games = {}
+
+def get_chat_game(chat_id: int):
+    if chat_id not in chats_games:
+        chats_games[chat_id] = {
+            "status": "IDLE",
+            "players": {},
+            "registered_users": set(),
+            "bunker": {},
+            "bunker_capacity": 0,
+            "current_round": 0,
+            "reg_task": None,
+            "voting_data": {}
+        }
+    return chats_games[chat_id]
+
+# ================= ПРОВЕРКА ПОЯВЛЕНИЯ ЧЕЛОВЕКА В ЧАТЕ =================
+@router.message()
+async def check_user_in_chat(message: Message):
+    if message.chat.type not in ["group", "supergroup"]:
+        return
+    
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    user = message.from_user
+    chat_id = message.chat.id
+    
+    try:
+        chat_member = await bot.get_chat_member(chat_id=chat_id, user_id=user.id)
+        if chat_member.status in ["member", "administrator", "creator"]:
+            # Приветствуем активного пользователя при необходимости
+            pass
+    except Exception as e:
+        logging.error(f"Ошибка проверки участника в чате: {e}")
 
 # ================= ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ УНИКАЛЬНОЙ ГЕНЕРАЦИИ =================
 def generate_unique_cards(existing_players):
-    """Генерирует абсолютно уникальные наборы карт без повторов среди уже играющих пользователей."""
     used_professions = {p["cards"]["profession"] for p in existing_players.values()}
     used_health = {p["cards"]["health"] for p in existing_players.values()}
     used_bios = {p["cards"]["bio"] for p in existing_players.values()}
@@ -211,15 +232,12 @@ def generate_unique_cards(existing_players):
     used_bags = {p["cards"]["bag"] for p in existing_players.values()}
     used_perks = {p["cards"]["perk"] for p in existing_players.values()}
 
-    # Профессии
     avail_prof = [x for x in PROFESSIONS if x not in used_professions]
     profession = random.choice(avail_prof) if avail_prof else random.choice(PROFESSIONS)
 
-    # Здоровье
     avail_health = [x for x in HEALTH_CONDITIONS if x not in used_health]
     health = random.choice(avail_health) if avail_health else random.choice(HEALTH_CONDITIONS)
 
-    # Био
     while True:
         gender = random.choice(BIO_GENDERS)
         age = random.randint(20, 65)
@@ -228,19 +246,15 @@ def generate_unique_cards(existing_players):
         if bio_str not in used_bios:
             break
 
-    # Хобби
     avail_hobby = [x for x in HOBBIES if x not in used_hobbies]
     hobby = random.choice(avail_hobby) if avail_hobby else random.choice(HOBBIES)
 
-    # Фобия
     avail_phobia = [x for x in PHOBIAS if x not in used_phobias]
     phobia = random.choice(avail_phobia) if avail_phobia else random.choice(PHOBIAS)
 
-    # Багаж
     avail_bag = [x for x in BAGS if x not in used_bags]
     bag = random.choice(avail_bag) if avail_bag else random.choice(BAGS)
 
-    # Спецсвойство
     avail_perk = [x for x in SPECIAL_PERKS if x not in used_perks]
     perk = random.choice(avail_perk) if avail_perk else random.choice(SPECIAL_PERKS)
 
@@ -257,7 +271,8 @@ def generate_unique_cards(existing_players):
 # ================= КОМАНДА /SETTINGS =================
 @router.message(Command("settings"))
 async def cmd_settings(message: Message):
-    if message.chat.id != TARGET_CHAT_ID:
+    if message.chat.type not in ["group", "supergroup"]:
+        await message.answer("Эту команду можно использовать только в групповых чатах!")
         return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -281,18 +296,22 @@ async def callback_reset_settings(callback: CallbackQuery):
 # ================= ОТКРЫТИЕ РЕГИСТРАЦИИ (/registration) =================
 @router.message(Command("registration"))
 async def cmd_registration(message: Message):
-    if message.chat.id != TARGET_CHAT_ID:
+    if message.chat.type not in ["group", "supergroup"]:
+        await message.answer("Эту команду можно использовать только в групповых чатах!")
         return
     
-    if game_state["status"] != "IDLE":
+    chat_id = message.chat.id
+    game = get_chat_game(chat_id)
+    
+    if game["status"] != "IDLE":
         await message.answer("Игра уже идет или регистрация уже открыта!")
         return
 
-    game_state["status"] = "REGISTRATION"
-    game_state["registered_users"] = set()
-    game_state["players"] = {}
+    game["status"] = "REGISTRATION"
+    game["registered_users"] = set()
+    game["players"] = {}
 
-    game_state["reg_task"] = asyncio.create_task(registration_timer(message.chat.id, current_settings["reg_time"]))
+    game["reg_task"] = asyncio.create_task(registration_timer(chat_id, current_settings["reg_time"]))
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Войти в бункер", callback_data="join_bunker")]
@@ -307,7 +326,8 @@ async def cmd_registration(message: Message):
 async def registration_timer(chat_id: int, duration: int):
     try:
         await asyncio.sleep(duration)
-        if game_state["status"] == "REGISTRATION":
+        game = get_chat_game(chat_id)
+        if game["status"] == "REGISTRATION":
             await bot.send_message(chat_id, "⏳ Время регистрации истекло! Используйте `/start_bunker` для старта игры.", parse_mode="Markdown")
     except asyncio.CancelledError:
         pass
@@ -315,59 +335,67 @@ async def registration_timer(chat_id: int, duration: int):
 # ================= ПРОДЛЕНИЕ РЕГИСТРАЦИИ (/extend_reg) =================
 @router.message(Command("extend_reg"))
 async def cmd_extend_reg(message: Message):
-    if message.chat.id != TARGET_CHAT_ID:
+    if message.chat.type not in ["group", "supergroup"]:
         return
     
-    if game_state["status"] != "REGISTRATION":
+    chat_id = message.chat.id
+    game = get_chat_game(chat_id)
+    
+    if game["status"] != "REGISTRATION":
         await message.answer("Регистрация сейчас не проводится!")
         return
 
-    if game_state["reg_task"]:
-        game_state["reg_task"].cancel()
+    if game["reg_task"]:
+        game["reg_task"].cancel()
 
-    game_state["reg_task"] = asyncio.create_task(registration_timer(message.chat.id, 300))
+    game["reg_task"] = asyncio.create_task(registration_timer(chat_id, 300))
     await message.answer("⏱ Регистрация продлена еще на 5 минут!", parse_mode="Markdown")
 
 # ================= ОТМЕНА РЕГИСТРАЦИИ (/cancel_registration) =================
 @router.message(Command("cancel_registration"))
 async def cmd_cancel_registration(message: Message):
-    if message.chat.id != TARGET_CHAT_ID:
+    if message.chat.type not in ["group", "supergroup"]:
         return
     
-    if game_state["status"] != "REGISTRATION":
+    chat_id = message.chat.id
+    game = get_chat_game(chat_id)
+    
+    if game["status"] != "REGISTRATION":
         await message.answer("Нет активной регистрации для отмены.")
         return
 
-    if game_state["reg_task"]:
-        game_state["reg_task"].cancel()
+    if game["reg_task"]:
+        game["reg_task"].cancel()
 
-    game_state["status"] = "IDLE"
-    game_state["registered_users"] = set()
-    game_state["players"] = {}
+    game["status"] = "IDLE"
+    game["registered_users"] = set()
+    game["players"] = {}
 
     await message.answer("🛑 Регистрация на игру была отменена.", parse_mode="Markdown")
 
 # ================= ВХОД В ИГРУ ПО КНОПКЕ =================
 @router.callback_query(F.data == "join_bunker")
 async def callback_join_bunker(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    game = get_chat_game(chat_id)
     user = callback.from_user
-    if game_state["status"] != "REGISTRATION":
+
+    if game["status"] != "REGISTRATION":
         await callback.answer("Регистрация закрыта или игра не идет!", show_alert=True)
         return
 
-    if user.id in game_state["registered_users"]:
+    if user.id in game["registered_users"]:
         await callback.answer("Вы уже в списке участников!", show_alert=True)
         return
 
-    game_state["registered_users"].add(user.id)
+    game["registered_users"].add(user.id)
     
     username_link = f"http://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
     display_name = f"[{user.full_name}]({username_link})"
     
-    # Генерация персонажа с проверкой на 100% уникальность вариантов
-    unique_cards = generate_unique_cards(game_state["players"])
+    unique_cards = generate_unique_cards(game["players"])
 
-    game_state["players"][user.id] = {
+    game["players"][user.id] = {
         "name": display_name,
         "raw_name": user.full_name,
         "username": user.username,
@@ -378,8 +406,8 @@ async def callback_join_bunker(callback: CallbackQuery):
 
     await callback.answer("Вы успешно зарегистрированы в игре!")
     
-    players_list_str = "\n".join([f"• {p['name']}" for p in game_state["players"].values()])
-    total_count = len(game_state["players"])
+    players_list_str = "\n".join([f"• {p['name']}" for p in game["players"].values()])
+    total_count = len(game["players"])
     
     text = f"🛑 **Ведётся набор в игру «Бункер»**\nЗарегистрировались:\n{players_list_str}\n\n**Итого:** {total_count} чел."
     
@@ -395,31 +423,33 @@ async def callback_join_bunker(callback: CallbackQuery):
 # ================= ЗАПУСК ИГРЫ (/start_bunker) =================
 @router.message(Command("start_bunker"))
 async def cmd_start_bunker(message: Message):
-    if message.chat.id != TARGET_CHAT_ID:
+    if message.chat.type not in ["group", "supergroup"]:
         return
     
-    if game_state["status"] != "REGISTRATION":
+    chat_id = message.chat.id
+    game = get_chat_game(chat_id)
+    
+    if game["status"] != "REGISTRATION":
         await message.answer("Сначала откройте регистрацию командой `/registration`!", parse_mode="Markdown")
         return
 
-    total_players = len(game_state["players"])
+    total_players = len(game["players"])
     if total_players < current_settings["min_players"]:
         await message.answer(f"Недостаточно игроков! Нужно минимум {current_settings['min_players']} участников.", parse_mode="Markdown")
         return
 
-    if game_state["reg_task"]:
-        game_state["reg_task"].cancel()
+    if game["reg_task"]:
+        game["reg_task"].cancel()
 
-    game_state["status"] = "PLAYING"
-    game_state["bunker_capacity"] = max(1, total_players // 2)
-    game_state["bunker"] = {
+    game["status"] = "PLAYING"
+    game["bunker_capacity"] = max(1, total_players // 2)
+    game["bunker"] = {
         "disaster": random.choice(DISASTERS),
         "data": random.choice(BUNKER_CONDITIONS)
     }
-    game_state["current_round"] = 1
+    game["current_round"] = 1
 
-    # Раздаем стартовые карты (Профессия) в ЛС
-    for user_id, p_data in game_state["players"].items():
+    for user_id, p_data in game["players"].items():
         try:
             prof = p_data['cards']['profession']
             p_data["revealed"].append(f"Профессия: {prof}")
@@ -437,7 +467,7 @@ async def cmd_start_bunker(message: Message):
         except Exception:
             await message.answer(f"⚠️ Не удалось отправить сообщение игроку {p_data['name']}. Убедитесь, что бот запущен у него в ЛС.", parse_mode="Markdown")
 
-    bunker_info = game_state["bunker"]
+    bunker_info = game["bunker"]
     await message.answer(
         f"💥 **Катастрофа произошла!**\n\n"
         f"🌍 **Катаклизм:** {bunker_info['disaster']}\n"
@@ -445,20 +475,27 @@ async def cmd_start_bunker(message: Message):
         f"⏳ **Срок изоляции:** {bunker_info['data']['years']}\n"
         f"🥫 **Еда и ресурсы:** {bunker_info['data']['food']}\n"
         f"⚙️ **Особенность:** {bunker_info['data']['features']}\n\n"
-        f"👥 Всего участников: {total_players} | 🕳 **Мест в бункере: {game_state['bunker_capacity']}**\n\n"
+        f"👥 Всего участников: {total_players} | 🕳 **Мест в бункере: {game['bunker_capacity']}**\n\n"
         f"🔔 **Раунд 1 начался!** У вас есть время на обсуждение.",
         parse_mode="Markdown"
     )
 
-# Управление открытием карт по раундам в ЛС
 @router.callback_query(F.data == "reveal_next_card")
 async def callback_reveal_card(callback: CallbackQuery):
     user_id = callback.from_user.id
-    if user_id not in game_state["players"]:
-        await callback.answer("Вы не участник текущей игры!", show_alert=True)
+    
+    # Ищем игрока по всем активным сессиям
+    found_game = None
+    for g in chats_games.values():
+        if user_id in g["players"]:
+            found_game = g
+            break
+            
+    if not found_game:
+        await callback.answer("Вы не участник активной игры!", show_alert=True)
         return
 
-    p_data = game_state["players"][user_id]
+    p_data = found_game["players"][user_id]
     cards = p_data["cards"]
     
     rounds_keys = [
@@ -485,32 +522,38 @@ async def callback_reveal_card(callback: CallbackQuery):
     await callback.answer(f"Открыто: {label}!")
     
     all_rev_text = "\n".join([f"• {item}" for item in p_data["revealed"]])
-    await callback.message.edit_text(
-        f"🎴 **Ваш персонаж в игре «Бункер»:**\n\n{all_rev_text}",
-        parse_mode="Markdown"
-    )
+    try:
+        await callback.message.edit_text(
+            f"🎴 **Ваш персонаж в игре «Бункер»:**\n\n{all_rev_text}",
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
 
 # ================= ГОЛОСОВАНИЕ В ЛС =================
 @router.message(Command("vote"))
 async def cmd_vote_trigger(message: Message):
-    if message.chat.id != TARGET_CHAT_ID:
+    if message.chat.type not in ["group", "supergroup"]:
         return
     
-    if game_state["status"] != "PLAYING":
+    chat_id = message.chat.id
+    game = get_chat_game(chat_id)
+    
+    if game["status"] != "PLAYING":
         await message.answer("Сейчас фаза голосования недоступна.")
         return
 
-    game_state["status"] = "VOTING"
-    game_state["voting_data"] = {}
+    game["status"] = "VOTING"
+    game["voting_data"] = {}
 
     await message.answer("🗳 **Фаза голосования началась!**\nКаждому оставшемуся участнику отправлена инструкция в личные сообщения для изгнания слабого игрока.", parse_mode="Markdown")
 
-    for uid, p in game_state["players"].items():
+    for uid, p in game["players"].items():
         if not p["is_alive"]:
             continue
         
         keyboard_buttons = []
-        for target_id, target_data in game_state["players"].items():
+        for target_id, target_data in game["players"].items():
             if target_id != uid and target_data["is_alive"]:
                 keyboard_buttons.append([InlineKeyboardButton(text=f"Выгнать: {target_data['raw_name']}", callback_data=f"vote_to_{target_id}")])
 
@@ -526,21 +569,27 @@ async def callback_vote_handler(callback: CallbackQuery):
     voter_id = callback.from_user.id
     target_id = int(callback.data.split("_")[2])
 
-    if voter_id not in game_state["players"] or not game_state["players"][voter_id]["is_alive"]:
+    found_game = None
+    for g in chats_games.values():
+        if voter_id in g["players"]:
+            found_game = g
+            break
+
+    if not found_game or not found_game["players"][voter_id]["is_alive"]:
         await callback.answer("Вы не можете голосовать!", show_alert=True)
         return
 
-    game_state["voting_data"][voter_id] = target_id
+    found_game["voting_data"][voter_id] = target_id
     await callback.answer("Ваш голос принят!")
     try:
         await callback.message.edit_text("✅ Ваш голос успешно учтен. Ожидайте результатов.")
     except Exception:
         pass
 
-    alive_players = [uid for uid, p in game_state["players"].items() if p["is_alive"]]
-    if len(game_state["voting_data"]) >= len(alive_players):
+    alive_players = [uid for uid, p in found_game["players"].items() if p["is_alive"]]
+    if len(found_game["voting_data"]) >= len(alive_players):
         votes_count = {}
-        for v_target in game_state["voting_data"].values():
+        for v_target in found_game["voting_data"].values():
             votes_count[v_target] = votes_count.get(v_target, 0) + 1
 
         if votes_count:
@@ -549,39 +598,53 @@ async def callback_vote_handler(callback: CallbackQuery):
 
             if len(candidates_to_kick) == 1:
                 kicked_id = candidates_to_kick[0]
-                game_state["players"][kicked_id]["is_alive"] = False
-                kicked_name = game_state["players"][kicked_id]["name"]
+                found_game["players"][kicked_id]["is_alive"] = False
+                kicked_name = found_game["players"][kicked_id]["name"]
 
-                game_state["status"] = "PLAYING"
+                found_game["status"] = "PLAYING"
                 
-                alive_remaining = [p for p in game_state["players"].values() if p["is_alive"]]
+                alive_remaining = [p for p in found_game["players"].values() if p["is_alive"]]
                 
-                if len(alive_remaining) <= game_state["bunker_capacity"]:
-                    survivors_str = "\n".join([f"• {p['name']}" for p in alive_remaining])
-                    await bot.send_message(
-                        TARGET_CHAT_ID,
-                        f"🚨 По результатам голосования изгнан игрок: {kicked_name}!\n\n"
-                        f"🏆 **Игра окончена!** Места в бункере заполнены. Выжившие:\n{survivors_str}",
-                        parse_mode="Markdown"
-                    )
-                    game_state["status"] = "IDLE"
-                else:
-                    await bot.send_message(
-                        TARGET_CHAT_ID,
-                        f"🚨 По результатам голосования из бункера изгнан игрок: {kicked_name}!\n\n"
-                        f"Осталось живых: {len(alive_remaining)}. Мест в бункере: {game_state['bunker_capacity']}.\n"
-                        f"Игра продолжается!",
-                        parse_mode="Markdown"
-                    )
+                # Ищем chat_id текущей игры для отправки в группу
+                target_chat_id = None
+                for cid, g in chats_games.items():
+                    if g == found_game:
+                        target_chat_id = cid
+                        break
+
+                if target_chat_id:
+                    if len(alive_remaining) <= found_game["bunker_capacity"]:
+                        survivors_str = "\n".join([f"• {p['name']}" for p in alive_remaining])
+                        await bot.send_message(
+                            target_chat_id,
+                            f"🚨 По результатам голосования изгнан игрок: {kicked_name}!\n\n"
+                            f"🏆 **Игра окончена!** Места в бункере заполнены. Выжившие:\n{survivors_str}",
+                            parse_mode="Markdown"
+                        )
+                        found_game["status"] = "IDLE"
+                    else:
+                        await bot.send_message(
+                            target_chat_id,
+                            f"🚨 По результатам голосования из бункера изгнан игрок: {kicked_name}!\n\n"
+                            f"Осталось живых: {len(alive_remaining)}. Мест в бункере: {found_game['bunker_capacity']}.\n"
+                            f"Игра продолжается!",
+                            parse_mode="Markdown"
+                        )
             else:
-                game_state["status"] = "PLAYING"
-                await bot.send_message(TARGET_CHAT_ID, "⚖️ Ничья при голосовании! Никто не изгнан в этом раунде. Продолжаем обсуждение.", parse_mode="Markdown")
+                found_game["status"] = "PLAYING"
+                for cid, g in chats_games.items():
+                    if g == found_game:
+                        await bot.send_message(cid, "⚖️ Ничья при голосовании! Никто не изгнан в этом раунде. Продолжаем обсуждение.", parse_mode="Markdown")
+                        break
 
 # ================= КОМАНДА /INFO ДЛЯ ЧАТА =================
 @router.message(Command("info"))
 async def cmd_info(message: Message):
-    if message.chat.id != TARGET_CHAT_ID:
+    if message.chat.type not in ["group", "supergroup"]:
         return
+    
+    chat_id = message.chat.id
+    game = get_chat_game(chat_id)
     
     args = message.text.split()
     if len(args) < 2:
@@ -591,13 +654,13 @@ async def cmd_info(message: Message):
     target_username = args[1].lstrip('@')
     
     found_player = None
-    for p_data in game_state["players"].values():
+    for p_data in game["players"].values():
         if p_data["username"] == target_username:
             found_player = p_data
             break
             
     if not found_player:
-        await message.answer("Игрок не найден или не участвует в текущей игре.")
+        await message.answer("Игрок не найден или не участвует в текущей игре этого чата.")
         return
         
     revealed_text = "\n".join([f"• {item}" for item in found_player["revealed"]]) if found_player["revealed"] else "Пока ничего не открыто."
@@ -610,4 +673,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
